@@ -31,6 +31,9 @@ jobs:
 
       - name: Test with pytest
         run: hatch run test -vv
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish:
     needs: test
     runs-on: ubuntu-latest
