@@ -1,5 +1,4 @@
 click==8.1.7
 hatch==1.9.4
-pycryptodome==3.4.3
 pytest==8.1.1
 requests==2.31.0

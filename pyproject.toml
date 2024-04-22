@@ -36,7 +36,7 @@ gistrun = "gistrun.cli:gistrun"
 path = "src/gistrun/__about__.py"
 
 [tool.hatch.envs.default]
-dependencies = ["coverage[toml]>=6.5", "pytest==8.1.1", "pycryptodome==3.4.3"]
+dependencies = ["coverage[toml]>=6.5", "pytest==8.1.1"]
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
