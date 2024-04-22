@@ -1,12 +1,13 @@
 name: Publish to TestPyPI
 
-"on":
-  workflow_run:
-    types:
-      - completed
+on:
   release:
     types:
       - prereleased
+  push:
+    branches:
+      - develop
+      - stage
 
 jobs:
   test:
