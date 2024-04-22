@@ -31,19 +31,8 @@ def create_mock_file(filename, content):
     return mock_file
 
 
-with open("tests/gists.txt", "rb") as f:
-    gist_data = json.loads(
-        Fernet(
-            base64.urlsafe_b64encode(
-                PBKDF2HMAC(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=b"320141cc-c302-4a6d-b2b2-7e5685069802",
-                    iterations=100000,
-                ).derive(bytes(os.getenv("GITHUB_TOKEN"), "utf-8"))
-            )
-        ).decrypt(base64.b64decode(f.read()))
-    )
+with open("tests/data.json", "r") as f:
+    gist_data = json.load(f)
 
 # DIFFERENT FILE TYPES
 python_file = create_mock_file("script.py", "print('Hello, World!')")
