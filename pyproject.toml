@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["click"]
+dependencies = ["click==8.1.7", "requests==2.31.0"]
 
 [project.urls]
 Documentation = "https://github.com/drengskapur/gistrun#readme"
@@ -36,7 +36,7 @@ gistrun = "gistrun.cli:gistrun"
 path = "src/gistrun/__about__.py"
 
 [tool.hatch.envs.default]
-dependencies = ["coverage[toml]>=6.5", "pytest", "pycryptodome==3.4.3"]
+dependencies = ["coverage[toml]>=6.5", "pytest==8.1.1", "pycryptodome==3.4.3"]
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
