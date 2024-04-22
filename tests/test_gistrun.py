@@ -1,5 +1,3 @@
-import base64
-import hashlib
 import io
 import json
 import os
@@ -9,9 +7,6 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 from click.testing import CliRunner
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from gistrun.__about__ import __version__
 from gistrun.cli import *
