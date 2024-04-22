@@ -1,6 +1,6 @@
 name: Publish to PyPI
 
-on:
+"on":
   workflow_run:
     workflows: ["CI"]
     types:
