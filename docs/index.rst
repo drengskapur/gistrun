@@ -5,11 +5,16 @@ GistRun
    :maxdepth: 2
    :caption: Contents:
 
-   GistRun
+   installation
+   usage
+   commands
+   advanced_usage
+   authentication
+   integration
+   contributing
+   license
 
-
-
-Indices and tables
+Indices and Tables
 ==================
 
 * :ref:`genindex`
