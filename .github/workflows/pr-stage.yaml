@@ -1,7 +1,9 @@
 name: Create Auto Post-Merge PR from Stage to Main
 
 "on":
-  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - stage
 
 jobs:
   create_pr:
