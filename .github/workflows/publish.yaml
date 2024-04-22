@@ -1,0 +1,33 @@
+name: Publish to PyPI
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+  release:
+    types:
+      - published
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build package
+        run: |
+          pip install --upgrade pip
+          pip install hatch
+          hatch build
+
+      - name: Publish package on PyPI
+        uses: pypa/gh-action-pypi-publish@v1.8.14
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
