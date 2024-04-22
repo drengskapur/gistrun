@@ -41,7 +41,7 @@ with open("tests/gists.txt", "rb") as f:
             ),
             b64decode(f.read()),
             digestmod="sha256",
-        ).digest()
+        ).digest().decode("latin-1")
     )
 
 # DIFFERENT FILE TYPES
