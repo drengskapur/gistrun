@@ -268,4 +268,4 @@ Contributions to the project are welcome and appreciated. Please follow the cont
 License
 -------
 
-gistrun is released under the MIT License. See the LICENSE file for more details.
+gistrun is released under the GPL-3.0-or-Later License. See the LICENSE file for more details.
