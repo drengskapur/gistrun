@@ -1,16 +1,17 @@
+import base64
 import hashlib
-import hmac
 import io
 import json
 import os
 import subprocess
-from base64 import b64decode
-from hashlib import pbkdf2_hmac
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
 from click.testing import CliRunner
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from gistrun.__about__ import __version__
 from gistrun.cli import *
@@ -32,16 +33,16 @@ def create_mock_file(filename, content):
 
 with open("tests/gists.txt", "rb") as f:
     gist_data = json.loads(
-        hmac.new(
-            pbkdf2_hmac(
-                "sha256",
-                bytes(os.getenv("GITHUB_TOKEN"), "utf-8"),
-                b"320141cc-c302-4a6d-b2b2-7e5685069802",
-                100000,
-            ),
-            b64decode(f.read()),
-            digestmod="sha256",
-        ).digest().decode("latin-1")
+        Fernet(
+            base64.urlsafe_b64encode(
+                PBKDF2HMAC(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=b"320141cc-c302-4a6d-b2b2-7e5685069802",
+                    iterations=100000,
+                ).derive(bytes(os.getenv("GITHUB_TOKEN"), "utf-8"))
+            )
+        ).decrypt(base64.b64decode(f.read()))
     )
 
 # DIFFERENT FILE TYPES
