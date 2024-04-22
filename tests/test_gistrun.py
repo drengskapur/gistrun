@@ -30,7 +30,7 @@ def create_mock_file(filename, content):
     return mock_file
 
 
-with open("gists.txt", "rb") as f:
+with open("tests/gists.txt", "rb") as f:
     gist_data = json.loads(
         Fernet(
             base64.urlsafe_b64encode(

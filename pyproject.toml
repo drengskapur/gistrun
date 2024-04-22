@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "gistrun"
 dynamic = ["version"]
 description = ''
-readme = "README.md"
+readme = "docs/README.rst"
 requires-python = ">=3.8"
 license = "GPL-3.0-or-later"
 keywords = []
@@ -25,9 +25,9 @@ classifiers = [
 dependencies = ["click"]
 
 [project.urls]
-Documentation = "https://github.com/unknown/gistrun#readme"
-Issues = "https://github.com/unknown/gistrun/issues"
-Source = "https://github.com/unknown/gistrun"
+Documentation = "https://github.com/drengskapur/gistrun#readme"
+Issues = "https://github.com/drengskapur/gistrun/issues"
+Source = "https://github.com/drengskapur/gistrun"
 
 [project.scripts]
 gistrun = "gistrun.cli:gistrun"
@@ -58,8 +58,8 @@ parallel = true
 omit = ["src/gistrun/__about__.py"]
 
 [tool.coverage.paths]
-gistrun = ["src/gistrun", "*/gistrun/src/gistrun"]
-tests = ["tests", "*/gistrun/tests"]
+gistrun = ["src/gistrun", "*/src/gistrun"]
+tests = ["tests", "*/tests"]
 
 [tool.coverage.report]
 exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
