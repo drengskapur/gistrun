@@ -309,6 +309,12 @@ def hash_gist(gist_data: Dict[str, Any], hash_func: str = "sha256", encoding: st
     return hash_obj.hexdigest()
 
 
+def compare_hash(gist_data: Dict[str, Any], expected_hash: str, hash_func: str) -> None:
+    actual_hash = hash_gist(gist_data, hash_func)
+    if actual_hash != expected_hash:
+        raise ValueError(f"Hash mismatch. Expected: {expected_hash}, Actual: {actual_hash}")
+
+
 def print_gist(gist_data: Dict[str, Any]) -> None:
     """
     Print the contents of the gist files.
@@ -325,7 +331,6 @@ def print_gist(gist_data: Dict[str, Any]) -> None:
 def execute_file(filename: str, file_obj: io.StringIO, command: str, timeout: int, dry_run: bool) -> Tuple[str, float]:
     """
     Executes a file using the provided command.
-
     :param filename: Name of the file to execute.
     :type filename: str
     :param file_obj: In-memory file-like object containing the file content.
@@ -347,9 +352,9 @@ def execute_file(filename: str, file_obj: io.StringIO, command: str, timeout: in
         try:
             start_time = time.time()
             with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
-                temp_file.write(file_obj.getvalue())  # Write the content from the io.StringIO object
+                temp_file.write(file_obj.getvalue())
                 temp_filename = temp_file.name
-            subprocess.run(f"{full_command} {temp_filename}", check=True, shell=True, timeout=timeout)
+            subprocess.run(f"{command} {temp_filename}", check=True, shell=True, timeout=timeout)
             os.remove(temp_filename)
             execution_time = time.time() - start_time
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -406,8 +411,7 @@ def validate_commands(commands: List[str], files: List[Tuple[str, str]]) -> List
         click.echo(f"Number of run commands ({num_commands}) does not match the number of files ({num_files}).")
         if not click.confirm("Do you want to proceed with the available commands?"):
             raise ValueError("Aborted due to command mismatch.")
-        commands = commands[:num_files]
-
+        commands = commands[:num_files] + ["skip"] * (num_files - num_commands)
     return commands
 
 
@@ -541,44 +545,91 @@ def gistrun():
 @click.option("--token", "-t", help="GitHub API token for accessing private gists.")
 @click.option("--timeout", type=int, default=60, help="Timeout for each file execution in seconds (default: 60).")
 @click.option("--report", is_flag=True, help="Generate an execution report.")
-def exec(username_gistname_pair, commands, dry_run, yes, token, timeout, report):
+@click.option("--hash", "-H", help="Expected hash of the combined gist contents.")
+@click.option("--hash-func", "-f", default="sha256", help="The hash function to use for comparing the hash (default: 'sha256').")
+def exec(username_gistname_pair, commands, dry_run, yes, token, timeout, report, hash, hash_func):
     """
     Fetch and execute code from a GitHub Gist.
 
-    This command fetches a specified GitHub Gist and executes the files within it using the provided commands.
-    It supports various options to customize the execution, such as dry-run mode, confirming execution, providing
-    a GitHub API token for accessing private gists, setting a timeout for file execution, and generating an execution
-    report.
+    Arguments:
 
-    :param username_gistname_pair: The GitHub username and gist name in the format 'username/gistname'.
-    :type username_gistname_pair: str
-    :param commands: List of commands to execute the files in order. Use 'skip' to skip a file.
-    :type commands: List[str]
-    :param dry_run: Whether to perform a dry run without executing the commands.
-    :type dry_run: bool
-    :param yes: Whether to confirm execution of commands or skip the confirmation prompt.
-    :type yes: bool
-    :param token: GitHub API token for accessing private gists.
-    :type token: str
-    :param timeout: Timeout for each file execution in seconds.
-    :type timeout: int
-    :param report: Whether to generate an execution report.
-    :type report: bool
+      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
+
+    Options:
+
+      -x, --run TEXT         Commands to execute the files in order. Can be specified multiple times. Use 'skip' to skip a file.
+
+      --dry-run              Perform a dry run without executing the commands.
+
+      -y, --yes              Confirm execution of commands.
+
+      -t, --token TEXT       GitHub API token for accessing private gists.
+
+      --timeout INTEGER      Timeout for each file execution in seconds (default: 60).
+
+      --report               Generate an execution report.
+
+      -H, --hash TEXT        Expected hash of the combined gist contents.
+
+      -f, --hash-func TEXT   The hash function to use for comparing the hash (default: 'sha256').
+
+      -h, --help             Show this message and exit.
+
+    Examples:
+
+      $ gistrun exec octocat/my-gist
+
+        Fetch and execute the code from the gist 'my-gist' owned by 'octocat'.
+
+      $ gistrun exec octocat/my-gist -x "python" -x "skip" -x "node"
+
+        Fetch and execute the code from 'my-gist', using the specified commands for each file in order.
+
+      $ gistrun exec octocat/my-gist --dry-run
+
+        Perform a dry run of executing the code from 'my-gist' without actually running the commands.
+
+      $ gistrun exec octocat/my-gist -y
+
+        Fetch and execute the code from 'my-gist' without prompting for confirmation.
+
+      $ gistrun exec octocat/my-private-gist -t YOUR_GITHUB_API_TOKEN
+
+        Fetch and execute the code from the private gist 'my-private-gist' using the provided GitHub API token.
+
+      $ gistrun exec octocat/my-gist --timeout 120
+
+        Fetch and execute the code from 'my-gist' with a timeout of 120 seconds for each file execution.
+
+      $ gistrun exec octocat/my-gist --report
+
+        Fetch and execute the code from 'my-gist' and generate an execution report.
+
+      $ gistrun exec octocat/my-gist -H EXPECTED_HASH
+
+        Fetch and execute the code from 'my-gist' and compare the combined gist contents with the expected hash.
     """
     try:
-        if username_gistname_pair:
-            username, gist_name = validate_username_gistname_pair(username_gistname_pair)
-            validate_username(username)
-            validate_gist_name(gist_name)
+        username, gist_name = validate_username_gistname_pair(username_gistname_pair)
+        validate_username(username)
+        validate_gist_name(gist_name)
+
         if not token:
             token = get_github_token_from_env()
+
         gist_data = fetch_gist(username, gist_name, token)
+
+        if hash:
+            compare_hash(gist_data, hash, hash_func)
+
         files = get_files(gist_data)
+
         if not commands:
             commands = [execute_mapping().get(os.path.splitext(filename)[1], "skip") for filename, _ in files]
         commands = validate_commands(commands, files)
+
         if files:
-            if not yes and not dry_run:
+            if not dry_run and not yes:
                 click.echo()
                 click.echo("The following commands will be executed:")
                 for filename, _ in files:
@@ -586,10 +637,11 @@ def exec(username_gistname_pair, commands, dry_run, yes, token, timeout, report)
                     click.echo()
                     click.echo(f"  {command} {filename}")
                 click.echo()
-            if not yes and not dry_run:
+
                 if not click.confirm("Are you sure you want to proceed?", abort=True):
                     click.echo("Aborted")
                     return
+
             if dry_run:
                 click.echo("Dry run - Skipping execution.")
             else:
@@ -599,11 +651,8 @@ def exec(username_gistname_pair, commands, dry_run, yes, token, timeout, report)
                     click.echo(report_content)
         else:
             click.echo(f"Gist '{gist_name}' doesn't contain any executable files.")
-
     except (requests.exceptions.RequestException, ValueError) as e:
         click.echo(f"Error: {e}")
-    finally:
-        click.echo()
 
 
 @click.command()
@@ -615,24 +664,29 @@ def hash(username_gistname_pair, token, hash_func):
     Generate a hash of the combined contents of a GitHub Gist.
 
     Arguments:
-      USERNAME/GIST_NAME  The GitHub username and gist name in the format
-                          'username/gistname'.
+
+      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
 
     Options:
+
       -t, --token TEXT      GitHub API token for accessing private gists.
-      -f, --hash-func TEXT  The hash function to use for generating the hash
-                            (default: 'sha256').
+
+      -f, --hash-func TEXT  The hash function to use for generating the hash (default: 'sha256').
+
       -h, --help            Show this message and exit.
 
     Examples:
+
       $ gistrun hash octocat/my-gist
+
         Generate a hash of the combined contents of the gist 'my-gist'.
 
       $ gistrun hash octocat/my-gist --token YOUR_GITHUB_API_TOKEN
-        Generate a hash of the combined contents of 'my-gist' using the
-        provided GitHub API token.
+
+        Generate a hash of the combined contents of 'my-gist' using the provided GitHub API token.
 
       $ gistrun hash octocat/my-gist --hash-func md5
+
         Generate an MD5 hash of the combined contents of 'my-gist'.
     """
     try:
@@ -659,20 +713,23 @@ def print(username_gistname_pair, token):
     Print the contents of a GitHub Gist with syntax highlighting.
 
     Arguments:
-      USERNAME/GIST_NAME  The GitHub username and gist name in the format
-                          'username/gistname'.
+
+      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
 
     Options:
+
       -t, --token TEXT    GitHub API token for accessing private gists.
+
       -h, --help          Show this message and exit.
 
     Examples:
+
       $ gistrun print octocat/my-gist
+
         Print the contents of the gist 'my-gist' with syntax highlighting.
 
-      $ gistrun print octocat/my-private-gist --token YOUR_GITHUB_API_TOKEN
-        Print the contents of the private gist 'my-private-gist' using the
-        provided GitHub API token.
+      $ gistrun print octocat/my-private-gist --token YOUR_GITHUB_API_TOKEN Print the contents of the private gist 'my-private-gist' using the  provided GitHub API token.
+
     """
     try:
         username, gist_name = validate_username_gistname_pair(username_gistname_pair)
@@ -698,19 +755,27 @@ def search(search, list_username, token):
     Search for gists or list gists of a specific user.
 
     Options:
+
       -s, --search TEXT   Search for gists based on the provided query.
+
       -l, --list TEXT     List all gists of the specified user.
+
       -t, --token TEXT    GitHub API token for accessing private gists.
+
       -h, --help          Show this message and exit.
 
     Examples:
+
       $ gistrun search --search "python script"
+
         Search for gists containing the query "python script".
 
       $ gistrun search --list octocat
+
         List all gists owned by the user 'octocat'.
 
       $ gistrun search --list octocat --token YOUR_GITHUB_API_TOKEN
+
         List all gists owned by 'octocat' using the provided GitHub API token.
     """
     try:
