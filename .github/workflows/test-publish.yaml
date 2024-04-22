@@ -1,9 +1,6 @@
 name: Publish to TestPyPI
 
-on:
-  release:
-    types:
-      - prereleased
+"on":
   push:
     branches:
       - stage
