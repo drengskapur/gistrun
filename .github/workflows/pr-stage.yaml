@@ -1,0 +1,21 @@
+name: Create Auto Post-Merge PR from Stage to Main
+
+"on":
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  create_pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@9153d83
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: 'Automatic PR from stage'
+          body: |
+            This is an automatic PR generated when changes are pushed to the 'stage' branch.
+            Review and merge into 'main' when ready.
+          base: stage
+          branch: stage
