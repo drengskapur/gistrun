@@ -12,7 +12,6 @@ GistRun provides several advanced features and options to enhance its functional
   advanced_usage/dry_run
   advanced_usage/execution_report
   advanced_usage/error_handling
-  advanced_usage/private_gists
 
 Execution Mapping and File Handling
 -----------------------------------
@@ -181,59 +180,3 @@ Here's an example of how exceptions are handled in the `exec` command:
           click.echo(f"Error: {e}")
 
 In this example, the `exec` command wraps its execution logic in a `try` block, and any `requests.exceptions.RequestException` or `ValueError` exceptions raised during the execution are caught and handled by printing an error message to the console.
-
-Accessing Private Gists
------------------------
-
-GistRun supports accessing private gists by providing a GitHub API token. You can either pass the token using the ``--token`` option or set it as an environment variable (``GH_TOKEN`` or ``GITHUB_TOKEN``).
-
-When accessing private gists, GistRun automatically includes the provided token in the API requests to GitHub, ensuring that you have the necessary permissions to fetch and execute the gist contents.
-
-Using the `--token` Option
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-To provide a GitHub API token when executing a command, use the ``--token`` (or ``-t``) option:
-
-.. code-block:: console
-
-  $ gistrun exec octocat/my-private-gist -t YOUR_GITHUB_API_TOKEN
-
-Replace ``YOUR_GITHUB_API_TOKEN`` with your actual GitHub API token.
-
-Using Environment Variables
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Alternatively, you can set the GitHub API token as an environment variable. GistRun supports the following environment variables:
-
-- ``GH_TOKEN``
-- ``GITHUB_TOKEN``
-
-If the token is not provided using the ``--token`` option, GistRun will attempt to retrieve it from these environment variables in the order listed above.
-
-For example, on Unix-based systems, you can set the ``GH_TOKEN`` environment variable like this:
-
-.. code-block:: console
-
-  $ export GH_TOKEN=YOUR_GITHUB_API_TOKEN
-  $ gistrun exec octocat/my-private-gist
-
-On Windows, use the ``set`` command:
-
-.. code-block:: console
-
-  > set GH_TOKEN=YOUR_GITHUB_API_TOKEN
-  > gistrun exec octocat/my-private-gist
-
-If you don't have a GitHub API token, follow these steps to create one:
-
-1. Go to your GitHub account settings by clicking on your profile picture in the top-right corner of GitHub and selecting "Settings".
-2. In the left sidebar, click on "Developer settings".
-3. In the left sidebar, click on "Personal access tokens".
-4. Click on "Generate new token".
-5. Give your token a descriptive name and select the appropriate scopes (e.g., `gist` for accessing gists).
-6. Click "Generate token" and copy the generated token.
-
-You can now use this token with GistRun to access your private gists.
-
-Note that GitHub API tokens grant read/write access to your account's data, so treat them like passwords and keep them secure.
-
