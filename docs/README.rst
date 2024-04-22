@@ -1,7 +1,7 @@
 .. _gistrun:
 
-GistRun
-=======
+GistRun: Put Your Gists to Work
+===============================
 
 GistRun is a command-line tool that allows you to fetch and execute code from GitHub Gists. It provides a convenient way to run code snippets or scripts directly from Gists, without the need to clone or download the entire repository.
 
@@ -39,25 +39,3 @@ The main command to execute code from a GitHub Gist is ``gistrun exec``:
    $ gistrun exec octocat/my-gist
 
 This command will fetch the gist named `my-gist` owned by the user `octocat` and execute the files it contains using the appropriate commands based on the file extensions.
-
-For more information on available commands and options, see the documentation.
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Contents:
-
-   installation
-   usage
-   commands
-   advanced_usage
-   authentication
-   integration
-   contributing
-   license
-
-Indices and Tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
