@@ -1,9 +1,11 @@
 .. _gistrun:
 
-GistRun: Put Your Gists to Work
+GistRun - Put Your Gists to Work
 ===============================
 
-GistRun is a command-line tool that allows you to fetch and execute code from GitHub Gists. It provides a convenient way to run code snippets or scripts directly from Gists, without the need to clone or download the entire repository.
+Have a bunch of code snippets scripts gathering dust? 
+
+GistRun is a command-line tool that lets you fetch and run that code directly from your Gists. GistRun saves you from having to clone or download entire repos just to access a few lines of code. No more tedious copy-pasting either—just run your Gists with a simple command. Turn those idle Gists into executable code with GistRun. Whether you're exploring programming concepts, testing algorithms, or sharing samples, this tool lets you actually use those snippets as runnable scripts. GistRun streamlines your workflow by bridging the gap between coding and research. Put your dormant Gists to work, increase productivity, and keep your coding efforts closely tied to your research—all with one utility. Make those forgotten snippets useful again with GistRun.
 
 .. warning::
    GistRun executes code from GitHub Gists. While convenient, this poses a security risk as the executed code may be malicious. Use GistRun only with Gists from trusted sources, and review the code before executing it. The authors of GistRun are not responsible for any damage caused by executing untrusted code.
