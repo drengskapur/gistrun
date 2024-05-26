@@ -1,822 +1,703 @@
-"""
-A command-line tool for fetching and executing code from GitHub Gists.
-"""
-
-import hashlib
-import io
+import click
 import os
-import re
+import requests
+import yaml
+from urllib.parse import urlparse
+import hashlib
 import subprocess
 import tempfile
 import time
-from typing import Any, Dict, List, Tuple
-
-import click
-import requests
+import platform
+from werkzeug.utils import secure_filename, uri_to_iri, iri_to_uri
 
 from gistrun.__about__ import __version__
 
-GITHUB_API_BASE_URL: str = "https://api.github.com"
-GIST_FETCH_LIMIT: int = 100
-REQUEST_TIMEOUT: int = 60 * 5
-GITHUB_TOKEN_ENV_VARS: List[str] = ["GH_TOKEN", "GITHUB_TOKEN"]
+GISTRUN_CONFIG_ENV_VAR = "GISTRUN_CONFIG"
+CONFIG_HOME_PATH = os.path.join(os.path.expanduser("~"), ".gistrun", ".gistrun-config.yaml")
+DEFAULT_EXECUTE_COMMAND = "bash"
+
+INSTALL_COMMANDS: Dict[str, str] = {
+    "win32": "winget install --id GitHub.cli",
+    "darwin": "brew install gh",
+    "linux": "sudo apt install gh",
+}
 
 
-def get_files(gist_data: Dict[str, Any]) -> List[Tuple[str, io.StringIO]]:
+def is_gh_installed() -> bool:
+    """Check if the 'gh' command-line tool is installed."""
+    try:
+        subprocess.run(
+            ["gh", "--version"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def install_gh() -> None:
+    """Install the 'gh' command-line tool."""
+    os_name = platform.system().lower()
+    if os_name not in INSTALL_COMMANDS:
+        click.echo(
+            f"Unsupported operating system: {os_name}. Please install 'gh' manually."
+        )
+        click.echo("Installation instructions: https://cli.github.com/manual/installation")
+        sys.exit(1)
+
+    install_cmd = INSTALL_COMMANDS[os_name]
+    click.echo(f"Installing 'gh' command-line tool using: {install_cmd}")
+    try:
+        subprocess.run(install_cmd, check=True, shell=True)
+        click.echo("'gh' command-line tool installed successfully.")
+    except subprocess.CalledProcessError:
+        click.echo(
+            f"Failed to install 'gh' command-line tool using: {install_cmd}"
+        )
+        click.echo(
+            "Please install it manually by following the instructions at: https://cli.github.com/manual/installation"
+        )
+        sys.exit(1)
+
+
+def find_config_file(start_dir=None):
     """
-    Extracts files from the provided Gist data.
+    Search for a .gistrun-config.yaml (or .yml) file recursively upwards.
 
-    :param gist_data: The data of the Gist.
-    :type gist_data: Dict[str, Any]
-    :return: A list of tuples with filename and in-memory file-like object.
-    :rtype: List[Tuple[str, io.StringIO]]
+    Args:
+        start_dir (str, optional): The directory to start the search from.
+                                      Defaults to the current working directory.
+
+    Returns:
+        str or None: The path to the config file if found, otherwise None.
     """
-    files = []
-    for filename, file_data in gist_data.get("files", {}).items():
-        raw_url = file_data["raw_url"]
-        content = requests.get(raw_url, timeout=REQUEST_TIMEOUT).text
-        file_obj = io.StringIO(content)
-        files.append((filename, file_obj))
-    return files
+    if start_dir is None:
+        start_dir = os.getcwd()
 
-
-def get_github_token_from_env() -> str:
-    """
-    Retrieves the GitHub API token from the environment variables.
-
-    :return: The GitHub API token if found, otherwise an empty string.
-    :rtype: str
-    """
-    for env_var in GITHUB_TOKEN_ENV_VARS:
-        token = os.getenv(env_var)
-        if token:
-            return token
-    return ""
-
-
-def validate_username_gistname_pair(username_gistname_pair: str) -> Tuple[str, str]:
-    """
-    Validate the format of the username and gist name pair.
-
-    :param username_gistname_pair: The combined username and gist name.
-    :type username_gistname_pair: str
-    :return: Tuple containing validated username and gist name.
-    :rtype: Tuple[str, str]
-    :raises ValueError: If the input format is incorrect or doesn't match the expected pattern.
-    """
-    if username_gistname_pair.count("/") != 1:
-        raise ValueError(f"Invalid format for username_gistname_pair: {username_gistname_pair}. Expected format: 'username/gistname'")
-
-    username, gist_name = username_gistname_pair.split("/", 1)
-    if not username or not gist_name:
-        raise ValueError("Neither username nor gist name can be empty.")
-
-    return username, gist_name
-
-
-def validate_username(username: str):
-    """
-    Validate the format of the GitHub username.
-
-    :param username: The GitHub username.
-    :type username: str
-    :raises ValueError: If the username format is invalid or too long.
-    """
-    username_pattern = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-_]{0,38}[a-zA-Z0-9])?$")
-    if not username_pattern.match(username):
-        raise ValueError(f"Invalid GitHub username format: {username}")
-    if len(username) > 39:
-        raise ValueError(f"GitHub username too long (maximum 39 characters): {username}")
-
-
-def validate_gist_name(gist_name: str):
-    """
-    Validate the format of the gist name.
-
-    :param gist_name: The name of the gist.
-    :type gist_name: str
-    :raises ValueError: If the gist name format is invalid.
-    """
-    gist_name_pattern = re.compile(r"^[a-zA-Z0-9-_\.]+$")
-    if not gist_name_pattern.match(gist_name):
-        raise ValueError(f"Invalid gist name format: {gist_name}")
-
-
-def search_gists(query: str, token: str = None) -> List[Dict[str, Any]]:
-    """
-    Search for gists based on the provided query.
-
-    :param query: The search query.
-    :type query: str
-    :param token: The GitHub API token for authentication (optional).
-    :type token: str
-    :return: A list of gist data matching the search query.
-    :rtype: List[Dict[str, Any]]
-    :raises requests.exceptions.RequestException: If there's an error while making the API request.
-    """
-    endpoint_url: str = f"{GITHUB_API_BASE_URL}/gists/public"
-    query_params: Dict[str, Any] = {"q": query, "per_page": GIST_FETCH_LIMIT}
-    headers = {"Authorization": f"token {token}"} if token else None
-    response: requests.Response = requests.get(endpoint_url, params=query_params, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
-
-
-def list_user_gists(username: str, token: str = None) -> List[Dict[str, Any]]:
-    """
-    List all gists of a given user.
-
-    :param username: The GitHub username.
-    :type username: str
-    :param token: The GitHub API token for authentication (optional).
-    :type token: str
-    :return: A list of gist data for the user.
-    :rtype: List[Dict[str, Any]]
-    :raises requests.exceptions.RequestException: If there's an error while making the API request.
-    """
-    endpoint_url: str = f"{GITHUB_API_BASE_URL}/users/{username}/gists"
-    query_params: Dict[str, Any] = {"per_page": GIST_FETCH_LIMIT}
-    headers = {"Authorization": f"token {token}"} if token else None
-    response: requests.Response = requests.get(endpoint_url, params=query_params, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
-
-
-def fetch_gists(username: str, page: int, token: str = None) -> List[Dict[str, Any]]:
-    """
-    Fetch gists for a given username and page number.
-
-    :param username: The GitHub username.
-    :type username: str
-    :param page: The page number of gists to fetch.
-    :type page: int
-    :param token: The GitHub API token for authentication (optional).
-    :type token: str
-    :return: A list of gist data.
-    :rtype: List[Dict[str, Any]]
-    :raises requests.exceptions.RequestException: If there's an error while making the API request.
-    """
-    endpoint_url: str = f"{GITHUB_API_BASE_URL}/users/{username}/gists"
-    query_params: Dict[str, Any] = {"per_page": GIST_FETCH_LIMIT, "page": page}
-    headers = {"Authorization": f"token {token}"} if token else None
-    response: requests.Response = requests.get(endpoint_url, params=query_params, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
-
-
-def fetch_gist(username: str, gist_name: str, token: str = None) -> Dict[str, Any]:
-    """
-    Fetch a specific gist by name from a user's gists.
-
-    :param username: The GitHub username.
-    :type username: str
-    :param gist_name: The description name of the gist to fetch.
-    :type gist_name: str
-    :param token: The GitHub API token for authentication (optional).
-    :type token: str
-    :return: The gist data if found.
-    :rtype: Dict[str, Any]
-    :raises ValueError: If the gist is not found.
-    """
-    page: int = 1
+    current_dir = start_dir
     while True:
-        gists: List[Dict[str, Any]] = list_user_gists(username, token)
-        if not gists:
+        for filename in [".gistrun-config.yaml", ".gistrun-config.yml"]:
+            config_path = os.path.join(current_dir, filename)
+            if os.path.exists(config_path):
+                return config_path
+
+        parent_dir = os.path.dirname(current_dir)
+        if parent_dir == current_dir:  # Reached the root
             break
+        current_dir = parent_dir
 
-        for gist in gists:
-            if gist["description"] == gist_name:
-                return gist
-
-        page += 1
-
-    raise ValueError(f"Gist not found: {username}/{gist_name}")
+    return None  # Not found
 
 
-def get_files(gist_data: Dict[str, Any]) -> List[Tuple[str, io.StringIO]]:
+def is_url(value):
     """
-    Extracts files from the provided Gist data.
+    Check if a value is a URL.
 
-    :param gist_data: The data of the Gist.
-    :type gist_data: Dict[str, Any]
-    :return: A list of tuples with filename and in-memory file-like object.
-    :rtype: List[Tuple[str, io.StringIO]]
+    Args:
+        value (str): The value to check.
+
+    Returns:
+        bool: True if the value is a URL, False otherwise.
     """
-    files = []
-    for filename, file_data in gist_data.get("files", {}).items():
-        raw_url = file_data["raw_url"]
-        content = requests.get(raw_url, timeout=REQUEST_TIMEOUT).text
-        file_obj = io.StringIO(content)
-        files.append((filename, file_obj))
-    return files
+    try:
+        result = urlparse(value)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
 
 
-def execute_mapping() -> Dict[str, str]:
+def validate_config(config):
     """
-    Returns a dictionary mapping file extensions to their respective execution commands.
+    Validates the structure of the gistrun configuration.
 
-    :return: A dictionary of file extension to execution command.
-    :rtype: Dict[str, str]
+    Args:
+        config (dict): The configuration dictionary.
+
+    Returns:
+        bool: True if valid, False otherwise.
+    """
+    if not isinstance(config, dict):
+        click.echo("WARNING: Configuration is not a dictionary.")
+        return False
+
+    if "bindings" not in config:
+        click.echo("WARNING: Configuration missing 'bindings' key.")
+        return False
+
+    if not isinstance(config["bindings"], list):
+        click.echo("WARNING: 'bindings' key should be a list.")
+        return False
+
+    for binding in config["bindings"]:
+        if not isinstance(binding, dict):
+            click.echo("WARNING: Each binding should be a dictionary.")
+            return False
+
+        if not all(key in binding for key in ("name", "url")):
+            click.echo(
+                "WARNING: Each binding must have 'name' and 'url' keys."
+            )
+            return False
+
+    return True
+
+
+def get_config(config_file=None):
+    """
+    Load and validate the gistrun configuration.
+
+    Loads in this order:
+        1. Specified config file (if provided)
+        2. Value from GISTRUN_CONFIG environment variable
+        3. Recursively search upwards from current directory
+        4. .gistrun/gistrun-config.yaml (or .yml) in user's home directory
+
+    Args:
+        config_file (str, optional): Path to the config file (overrides other methods).
+
+    Returns:
+        dict: The loaded configuration dictionary.
     """
 
-    mapping = {
-        ".asm": "nasm",
-        ".awk": "awk -f",
-        ".bat": "cmd /c",
-        ".c": "gcc",
-        ".clj": "clojure",
-        ".cpp": "g++",
-        ".cs": "dotnet script",
-        ".css": "skip",
-        ".dart": "dart",
-        ".erl": "escript",
-        ".fsx": "dotnet fsi",
-        ".go": "go run",
-        ".groovy": "groovy",
-        ".h": "skip",
-        ".hpp": "skip",
-        ".hs": "runhaskell",
-        ".html": "skip",
-        ".java": "javac",
-        ".js": "node",
-        ".json": "skip",
-        ".jsx": "node",
-        ".kt": "kotlin",
-        ".less": "skip",
-        ".lua": "lua",
-        ".m": "octave",
-        ".md": "skip",
-        ".ml": "ocaml",
-        ".nim": "nim compile --run",
-        ".p": "prolog",
-        ".pas": "fpc",
-        ".php": "php",
-        ".pl": "perl",
-        ".ps1": "powershell -File",
-        ".py": "python",
-        ".pyc": "python",
-        ".pyx": "cython",
-        ".r": "Rscript",
-        ".rb": "ruby",
-        ".rs": "rustc",
-        ".rst": "skip",
-        ".sass": "skip",
-        ".scala": "scala",
-        ".scss": "skip",
-        ".sh": "bash",
-        ".sml": "sml",
-        ".sql": "skip",
-        ".swift": "swift",
-        ".tcl": "tclsh",
-        ".tex": "skip",
-        ".ts": "ts-node",
-        ".tsx": "ts-node",
-        ".txt": "skip",
-        ".vb": "vbnc",
-        ".vbs": "cscript //Nologo",
-        ".vue": "skip",
-        ".xml": "skip",
-        ".yaml": "skip",
-        ".yml": "skip",
-    }
-
-    lowercase_mapping = {ext.lower(): cmd for ext, cmd in mapping.items()}
-
-    class CaseInsensitiveDict(dict):
-        def __missing__(self, key):
-            return self.get(key.lower(), "")
-
-    return CaseInsensitiveDict(lowercase_mapping)
-
-
-def hash_gist(gist_data: Dict[str, Any], hash_func: str = "sha256", encoding: str = "utf-8") -> str:
-    """
-    Generate a hash of the combined contents of the gist files.
-
-    :param gist_data: The data of the Gist.
-    :type gist_data: Dict[str, Any]
-    :param hash_func: The hash function to use (default: "sha256").
-    :type hash_func: str
-    :param encoding: The encoding to use for the file contents (default: "utf-8").
-    :type encoding: str
-    :return: The hash of the combined gist contents.
-    :rtype: str
-    """
-    files = get_files(gist_data)
-    combined_content = "".join(file_obj.getvalue() for _, file_obj in files)
-    hash_obj = hashlib.new(hash_func)
-    hash_obj.update(combined_content.encode(encoding))
-    return hash_obj.hexdigest()
-
-
-def compare_hash(gist_data: Dict[str, Any], expected_hash: str, hash_func: str) -> None:
-    actual_hash = hash_gist(gist_data, hash_func)
-    if actual_hash != expected_hash:
-        raise ValueError(f"Hash mismatch. Expected: {expected_hash}, Actual: {actual_hash}")
-
-
-def print_gist(gist_data: Dict[str, Any]) -> None:
-    """
-    Print the contents of the gist files.
-    :param gist_data: The data of the Gist.
-    :type gist_data: Dict[str, Any]
-    """
-    files = get_files(gist_data)
-    for filename, file_obj in files:
-        click.echo(f"File: {filename}")
-        click.echo(file_obj.getvalue())
-        click.echo()
-
-
-def execute_file(filename: str, file_obj: io.StringIO, command: str, timeout: int, dry_run: bool) -> Tuple[str, float]:
-    """
-    Executes a file using the provided command.
-    :param filename: Name of the file to execute.
-    :type filename: str
-    :param file_obj: In-memory file-like object containing the file content.
-    :type file_obj: io.StringIO
-    :param command: Command to execute the file.
-    :type command: str
-    :param timeout: Timeout for the execution in seconds.
-    :type timeout: int
-    :param dry_run: Whether to perform a dry run without executing the command.
-    :type dry_run: bool
-    :return: A tuple containing the full command string and the execution time in seconds.
-    :rtype: Tuple[str, float]
-    """
-    full_command = f"{command} {filename}"
-    if dry_run:
-        click.echo(f"Dry run - Skipping execution of {filename} with {full_command}")
-        execution_time = 0.0
-    else:
+    if config_file:
         try:
-            start_time = time.time()
-            with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
-                temp_file.write(file_obj.getvalue())
-                temp_filename = temp_file.name
-            subprocess.run(f"{command} {temp_filename}", check=True, shell=True, timeout=timeout)
-            os.remove(temp_filename)
-            execution_time = time.time() - start_time
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            click.echo(f"Error executing {filename}: {e}")
-            execution_time = 0.0
-    return full_command, execution_time
+            return load_config(config_file)
+        except FileNotFoundError:
+            pass
+
+    # Check environment variable
+    config_file_from_env = os.getenv(GISTRUN_CONFIG_ENV_VAR)
+    if config_file_from_env:
+        try:
+            return load_config(config_file_from_env)
+        except FileNotFoundError:
+            pass
+
+    # Check other locations if not found in environment or argument
+    config_file = find_config_file()
+    if config_file:
+        try:
+            return load_config(config_file)
+        except FileNotFoundError:
+            pass
+
+    # Fallback to home directory if no config file is found
+    try:
+        return load_config(os.path.join(CONFIG_HOME_PATH))
+    except FileNotFoundError:
+        pass
+
+    return {"bindings": []}  # Return empty config if no file is found
 
 
-def execute_files(files: List[Tuple[str, io.StringIO]], commands: List[str], timeout: int, dry_run: bool) -> List[Tuple[str, float]]:
+def load_config(config_path):
     """
-    Execute files using the provided commands.
+    Load the configuration from the specified path.
 
-    :param files: List of tuples containing filename and in-memory file-like object.
-    :type files: List[Tuple[str, io.StringIO]]
-    :param commands: List of commands to execute the files.
-    :type commands: List[str]
-    :param timeout: Timeout for each file execution in seconds.
-    :type timeout: int
-    :param dry_run: Whether to perform a dry run without executing the commands.
-    :type dry_run: bool
-    :return: List of tuples containing full command strings and execution times.
-    :rtype: List[Tuple[str, float]]
+    Args:
+        config_path (str): The path to the configuration file.
+
+    Returns:
+        dict: The loaded configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the configuration file is not found.
+        yaml.YAMLError: If there's an error parsing the YAML file.
+        ValueError: If the configuration file is invalid.
     """
-    results = []
-    for (filename, file_obj), command in zip(files, commands):
-        if command.lower() == "skip":
-            click.echo(f"Skipping {filename}...")
-            results.append((f"Skipped {filename}", 0.0))
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}")
+
+    if not validate_config(config):
+        raise ValueError("Configuration file failed validation.")
+
+    # Set default execute commands based on file extensions (if provided)
+    extension_mapping = config.get("extensions", {})
+    for binding in config["bindings"]:
+        if "files" in binding:
+            for file_config in binding["files"]:
+                if "execute" not in file_config:
+                    file_name = file_config.get("name")
+                    _, ext = os.path.splitext(file_name)
+                    file_config["execute"] = extension_mapping.get(ext)
+
+    return config
+
+
+def get_gist_url(username: str, gist_id: str) -> str:
+    """
+    Construct the URL to fetch the raw content of a gist.
+
+    Args:
+        username (str): The GitHub username.
+        gist_id (str): The Gist ID.
+
+    Returns:
+        str: The URL to fetch the raw content of the gist.
+    """
+    return f"https://gist.githubusercontent.com/{username}/{gist_id}/raw"
+
+
+def get_gist_content(gist_url: str, token: str = None) -> str:
+    """
+    Fetch the raw content of a gist.
+
+    Args:
+        gist_url (str): The URL to fetch the raw content.
+        token (str, optional): The GitHub API token for authentication.
+
+    Returns:
+        str: The raw content of the gist.
+
+    Raises:
+        requests.exceptions.RequestException: If there's an error fetching the gist content.
+        FileNotFoundError: If the gist is not found (HTTP 404).
+    """
+    headers = {}
+    if token:
+        headers["Authorization"] = f"token {token}"
+    try:
+        response = requests.get(gist_url, headers=headers, timeout=60)
+        response.raise_for_status()  # This will raise an error for 404 (Not Found)
+        return response.text
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            raise FileNotFoundError(f"Gist not found at: {gist_url}")
         else:
-            full_command, execution_time = execute_file(filename, file_obj, command, timeout, dry_run)
-            results.append((full_command, execution_time))
-    return results
+            raise requests.exceptions.RequestException(
+                f"Error fetching gist content: {e}"
+            )
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(f"Error fetching gist content: {e}")
 
 
-def validate_commands(commands: List[str], files: List[Tuple[str, str]]) -> List[str]:
+def execute_script(content: str, execute_command: str, timeout: int, dry_run: bool):
     """
-    Validate the commands against the number of files.
+    Execute the provided script content using the specified command.
 
-    :param commands: List of commands to execute the files.
-    :type commands: List[str]
-    :param files: List of tuples containing filename and code.
-    :type files: List[Tuple[str, str]]
-    :return: List of validated commands.
-    :rtype: List[str]
-    :raises ValueError: If the number of commands doesn't match the number of files.
+    Args:
+        content (str): The content of the script to execute.
+        execute_command (str): The command to use to execute the script.
+        timeout (int): The timeout for execution in seconds.
+        dry_run (bool): If True, only print the command, don't execute.
     """
-    num_files = len(files)
-    num_commands = len(commands)
+    if dry_run:
+        click.echo(f"Dry run: {execute_command} (content omitted)")
+        return
 
-    if num_commands == 0:
-        click.echo("No commands provided to execute files.")
-        return ["skip"] * num_files
-    elif num_commands != num_files:
-        click.echo(f"Number of run commands ({num_commands}) does not match the number of files ({num_files}).")
-        if not click.confirm("Do you want to proceed with the available commands?"):
-            raise ValueError("Aborted due to command mismatch.")
-        commands = commands[:num_files] + ["skip"] * (num_files - num_commands)
-    return commands
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
+        temp_file.write(content)
+        temp_filename = temp_file.name
 
-
-def generate_execution_report(results: List[Tuple[str, float]]) -> str:
-    """
-    Generate a report of the execution results.
-
-    :param results: List of tuples containing full command strings and execution times.
-    :type results: List[Tuple[str, float]]
-    :return: The generated execution report.
-    :rtype: str
-    """
-    report = "Execution Report:\n"
-    total_time = 0.0
-    for command, execution_time in results:
-        report += f"- Command: {command}\n"
-        report += f"  Execution Time: {execution_time:.2f} seconds\n"
-        total_time += execution_time
-    report += f"\nTotal Execution Time: {total_time:.2f} seconds"
-    return report
+    try:
+        start_time = time.time()
+        subprocess.run(
+            f"{execute_command} {temp_filename}",
+            check=True,
+            shell=True,
+            timeout=timeout,
+        )
+        end_time = time.time()
+        click.echo(
+            f"Script executed successfully in {end_time - start_time:.2f} seconds."
+        )
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Error executing script: {e}")
+    except subprocess.TimeoutExpired:
+        click.echo(f"Execution timed out after {timeout} seconds.")
+    finally:
+        os.remove(temp_filename)
 
 
 @click.group()
-@click.version_option(__version__, "--version", help="Show the version and exit.")
 def gistrun():
-    """
-    gistrun: A command-line tool for fetching and executing code from GitHub Gists.
+    """A command-line tool for fetching and executing code from GitHub Gists."""
+    # Check if 'gh' is installed
+    if not is_gh_installed():
+        click.echo("The 'gh' command-line tool is not installed.")
+        if click.confirm("Do you want to install it now?"):
+            install_gh()
+        else:
+            click.echo(
+                "Please install 'gh' manually. See instructions: https://cli.github.com/manual/installation"
+            )
+            sys.exit(1)
 
-    Usage:
 
-        gistrun [OPTIONS] COMMAND [ARGS]...
-
-    Options:
-
-        --version   Show the version and exit.
-
-        --help      Show this message and exit.
-
-    Commands:
-
-        exec        Fetch and execute code from a GitHub Gist.
-
-        hash        Generate a hash of the combined contents of a GitHub Gist.
-
-        print       Print the contents of a GitHub Gist.
-
-        run         Fetch and execute code from a GitHub Gist.
-
-        search      Search for gists or list gists of a specific user.
-
-    Run 'gistrun COMMAND --help' for more information on a specific command.
-
-    GitHub Authentication:
-
-        The gistrun tool supports accessing private gists by providing a GitHub API token. You can either pass the token using the '--token' option or set it as an environment variable.
-
-        The following environment variables are supported:
-
-            - GH_TOKEN
-
-            - GITHUB_TOKEN
-
-        If the token is not provided, gistrun will attempt to retrieve it from the environment variables in the order listed above.
-
-    Examples:
-
-        $ gistrun exec octocat/my-gist
-
-            Fetch and execute the code from the gist 'my-gist' owned by 'octocat'.
-
-        $ gistrun exec octocat/my-gist -x "python" -x "skip" -x "node"
-
-            Fetch and execute the code from 'my-gist', using the specified commands for each file in order.
-
-        $ gistrun exec octocat/my-gist --dry-run
-
-            Perform a dry run of executing the code from 'my-gist' without actually running the commands.
-
-        $ gistrun exec octocat/my-gist -y
-
-            Fetch and execute the code from 'my-gist' without prompting for confirmation.
-
-        $ gistrun exec octocat/my-private-gist -t YOUR_GITHUB_API_TOKEN
-
-            Fetch and execute the code from the private gist 'my-private-gist' using the provided GitHub API token.
-
-        $ gistrun exec octocat/my-gist --timeout 120
-
-            Fetch and execute the code from 'my-gist' with a timeout of 120 seconds for each file execution.
-
-        $ gistrun exec octocat/my-gist --report
-
-            Fetch and execute the code from 'my-gist' and generate an execution report.
-
-        $ gistrun hash octocat/my-gist
-
-            Generate a hash of the combined contents of the gist 'my-gist'.
-
-        $ gistrun hash octocat/my-gist --token YOUR_GITHUB_API_TOKEN
-
-            Generate a hash of the combined contents of 'my-gist' using the provided GitHub API token.
-
-        $ gistrun print octocat/my-gist
-
-            Print the contents of the gist 'my-gist'.
-
-        $ gistrun print octocat/my-private-gist --token YOUR_GITHUB_API_TOKEN
-
-            Print the contents of the private gist 'my-private-gist' using the provided GitHub API token.
-
-        $ gistrun search --search "python script"
-
-            Search for gists containing the query "python script".
-
-        $ gistrun search --list octocat
-
-            List all gists owned by the user 'octocat'.
-
-        $ gistrun search --list octocat --token YOUR_GITHUB_API_TOKEN
-
-            List all gists owned by 'octocat' using the provided GitHub API token.
-    """
+@gistrun.group()
+def config():
+    """Manage gistrun configuration bindings."""
     pass
 
 
+@config.command()
+@click.argument("value")
+@click.option(
+    "--config-file",
+    "-c",
+    help="Path to the local configuration file (optional)",
+)
+def set(value, config_file=None):
+    """
+    Set the default gist user or specify a URL to a remote configuration file.
+
+    If no configuration file exists, a default one will be created in
+    your home directory at: ~/.gistrun/.gistrun-config.yaml
+
+    VALUE can be either:
+      - <username>:           Sets the default GitHub gist user.
+      - <config-url>:         Sets the URL to a remote .gistrun-config.yaml file.
+    """
+    if config_file is None:
+        config_file = CONFIG_HOME_PATH  # Default config file path
+
+    if "/" not in value and not is_url(value):  # Assume username
+        config = {"gist_user": value, "bindings": []}
+
+        with open(config_file, "w") as f:
+            yaml.dump(config, f)
+        click.echo(f"Default gist user set to: {value}")
+
+    elif is_url(value):  # Assume URL to remote config
+        try:
+            response = requests.get(value)
+            response.raise_for_status()
+            config = yaml.safe_load(response.text)
+
+            # Validate the structure of config
+            if not validate_config(config):
+                raise ValueError("Invalid configuration from URL.")
+
+            with open(config_file, "w") as f:
+                yaml.dump(config, f)
+            click.echo(f"Configuration loaded from URL: {value}")
+
+        except requests.exceptions.RequestException as e:
+            click.echo(f"Error fetching remote configuration: {e}")
+        except yaml.YAMLError as e:
+            click.echo(f"Invalid YAML in remote configuration: {e}")
+        except ValueError as e:
+            click.echo(f"Error: {e}")
+    else:
+        click.echo(
+            "Invalid input. Please provide a valid gist username or a URL."
+        )
+
+    # Validate after setting
+    if validate_config(config):
+        click.echo("Configuration is valid.")
+    else:
+        click.echo(
+            "Configuration has validation errors. Please review the warnings."
+        )
+
+
+@config.command()
+@click.argument("name")
+@click.argument("url")
+@click.option(
+    "--execute",
+    "-e",
+    help="Specify the command to execute the binding (optional)",
+)
+@click.option("--config-file", "-c", help="Path to the configuration file (optional)")
+def add(name, url, execute, config_file=None):
+    """
+    Add a binding to the configuration file.
+
+    NAME:  The name or alias for the script or folder.
+    URL:   The URL to the gist raw file or folder.
+    """
+    config = get_config(config_file)
+
+    new_binding = {"name": name, "url": url}
+    if execute:
+        new_binding["execute"] = execute
+
+    config["bindings"].append(new_binding)
+
+    if config_file is None:
+        config_file = find_config_file()
+        if config_file is None:
+            config_file = CONFIG_HOME_PATH
+
+    with open(config_file, "w") as f:
+        yaml.dump(config, f)
+    click.echo(f"Binding '{name}' added to configuration: {config_file}")
+
+
+@config.command()
+@click.argument("name")
+@click.option("--config-file", "-c", help="Path to the configuration file (optional)")
+def remove(name, config_file=None):
+    """
+    Remove a binding from the configuration file.
+
+    NAME: The name or alias of the script or folder to remove.
+    """
+    config = get_config(config_file)
+
+    config["bindings"] = [b for b in config["bindings"] if b["name"] != name]
+
+    if config_file is None:
+        config_file = find_config_file()
+        if config_file is None:
+            config_file = CONFIG_HOME_PATH
+
+    with open(config_file, "w") as f:
+        yaml.dump(config, f)
+    click.echo(f"Binding '{name}' removed from configuration: {config_file}")
+
+
+@config.command()
+@click.option("--config-file", "-c", help="Path to the configuration file (optional)")
+def list(config_file=None):
+    """List all bindings in the configuration file."""
+    config = get_config(config_file)
+
+    if config["bindings"]:
+        click.echo("Bindings:")
+        for binding in config["bindings"]:
+            click.echo(
+                f"  - {binding['name']}: {iri_to_uri(binding['url'])}"
+            )  # Use iri_to_uri for display
+            if "execute" in binding:
+                click.echo(f"    Execute: {binding['execute']}")
+    else:
+        click.echo("No bindings found in the configuration.")
+
+
+@config.command()
+@click.argument("source", required=False)
+@click.option(
+    "--config-file",
+    "-c",
+    help="Path to the local configuration file (optional)",
+)
+def validate(source, config_file=None):
+    """
+    Validate a gistrun configuration file.
+
+    SOURCE (optional):
+      - <config-url>:       URL to a remote .gistrun-config.yaml file.
+      - <config-file-path>: Path to a local .gistrun-config.yaml file.
+
+    If SOURCE is not provided, the currently active configuration will be validated.
+    """
+    if source:
+        # Validate remote or local file based on source
+        if is_url(source):  # Assume URL
+            try:
+                response = requests.get(source)
+                response.raise_for_status()
+                config = yaml.safe_load(response.text)
+            except requests.exceptions.RequestException as e:
+                click.echo(f"Error fetching remote configuration: {e}")
+                return
+            except yaml.YAMLError as e:
+                click.echo(f"Invalid YAML in remote configuration: {e}")
+                return
+        else:  # Assume file path
+            try:
+                with open(source, "r") as f:
+                    config = yaml.safe_load(f)
+            except FileNotFoundError:
+                click.echo(f"Configuration file not found: {source}")
+                return
+            except yaml.YAMLError as e:
+                click.echo(f"Invalid YAML in configuration file: {e}")
+                return
+    else:
+        # Validate the currently set configuration
+        config = get_config(config_file)
+
+    if validate_config(config):
+        click.echo("Configuration is valid.")
+    else:
+        click.echo(
+            "Configuration has validation errors. Please review the warnings."
+        )
+
+
 @gistrun.command()
-@click.argument("username_gistname_pair")
-@click.option("--run", "-x", "commands", multiple=True, help="Commands to execute the files in order. Can be specified multiple times. Use 'skip' to skip a file.")
-@click.option("--dry-run", is_flag=True, help="Perform a dry run without executing the commands.")
-@click.option("--yes", "-y", is_flag=True, help="Confirm execution of commands.")
-@click.option("--token", "-t", help="GitHub API token for accessing private gists.")
-@click.option("--timeout", type=int, default=60, help="Timeout for each file execution in seconds (default: 60).")
-@click.option("--report", is_flag=True, help="Generate an execution report.")
-@click.option("--hash", "-H", help="Expected hash of the combined gist contents.")
-@click.option("--hash-func", "-f", default="sha256", help="The hash function to use for comparing the hash (default: 'sha256').")
-def exec(username_gistname_pair, commands, dry_run, yes, token, timeout, report, hash, hash_func):
+@click.argument("name")  # Can be "alias/script" or "script"
+@click.option("--dry-run", is_flag=True, help="Perform a dry run.")
+@click.option("--token", "-t", help="GitHub API token.")
+@click.option("--timeout", type=int, default=60, help="Timeout in seconds.")
+@click.option("--config-file", "-c", help="Path to the config file (optional)")
+def exec(name, dry_run, token, timeout, config_file=None):
     """
-    Fetch and execute code from a GitHub Gist.
+    Execute a script from a Gist.
 
-    Arguments:
-
-      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
-
-    Options:
-
-      -x, --run TEXT         Commands to execute the files in order. Can be specified multiple times. Use 'skip' to skip a file.
-
-      --dry-run              Perform a dry run without executing the commands.
-
-      -y, --yes              Confirm execution of commands.
-
-      -t, --token TEXT       GitHub API token for accessing private gists.
-
-      --timeout INTEGER      Timeout for each file execution in seconds (default: 60).
-
-      --report               Generate an execution report.
-
-      -H, --hash TEXT        Expected hash of the combined gist contents.
-
-      -f, --hash-func TEXT   The hash function to use for comparing the hash (default: 'sha256').
-
-      -h, --help             Show this message and exit.
-
-    Examples:
-
-      $ gistrun exec octocat/my-gist
-
-        Fetch and execute the code from the gist 'my-gist' owned by 'octocat'.
-
-      $ gistrun exec octocat/my-gist -x "python" -x "skip" -x "node"
-
-        Fetch and execute the code from 'my-gist', using the specified commands for each file in order.
-
-      $ gistrun exec octocat/my-gist --dry-run
-
-        Perform a dry run of executing the code from 'my-gist' without actually running the commands.
-
-      $ gistrun exec octocat/my-gist -y
-
-        Fetch and execute the code from 'my-gist' without prompting for confirmation.
-
-      $ gistrun exec octocat/my-private-gist -t YOUR_GITHUB_API_TOKEN
-
-        Fetch and execute the code from the private gist 'my-private-gist' using the provided GitHub API token.
-
-      $ gistrun exec octocat/my-gist --timeout 120
-
-        Fetch and execute the code from 'my-gist' with a timeout of 120 seconds for each file execution.
-
-      $ gistrun exec octocat/my-gist --report
-
-        Fetch and execute the code from 'my-gist' and generate an execution report.
-
-      $ gistrun exec octocat/my-gist -H EXPECTED_HASH
-
-        Fetch and execute the code from 'my-gist' and compare the combined gist contents with the expected hash.
+    NAME:  The name or alias of the script, or "alias/script" for scripts in folders.
     """
-    try:
-        username, gist_name = validate_username_gistname_pair(username_gistname_pair)
-        validate_username(username)
-        validate_gist_name(gist_name)
+    config = get_config(config_file)
 
-        if not token:
-            token = get_github_token_from_env()
+    gist_user = config.get("gist_user")
+    if not gist_user:
+        click.echo(
+            "Error: Default gist user not set. "
+            "Please run 'gistrun config set <username>' to configure."
+        )
+        return
 
-        gist_data = fetch_gist(username, gist_name, token)
+    bindings = config.get("bindings", [])
 
-        if hash:
-            compare_hash(gist_data, hash, hash_func)
+    if "/" in name:  # "alias/script" format
+        alias, script_name = name.split("/", 1)
+        binding = next((b for b in bindings if b["name"] == alias), None)
+        if binding:
+            base_url = binding["url"]
+            script_url = f"{base_url}{script_name}"
 
-        files = get_files(gist_data)
-
-        if not commands:
-            commands = [execute_mapping().get(os.path.splitext(filename)[1], "skip") for filename, _ in files]
-        commands = validate_commands(commands, files)
-
-        if files:
-            if not dry_run and not yes:
-                click.echo()
-                click.echo("The following commands will be executed:")
-                for filename, _ in files:
-                    command = commands[files.index((filename, _))]
-                    click.echo()
-                    click.echo(f"  {command} {filename}")
-                click.echo()
-
-                if not click.confirm("Are you sure you want to proceed?", abort=True):
-                    click.echo("Aborted")
-                    return
-
-            if dry_run:
-                click.echo("Dry run - Skipping execution.")
-            else:
-                results = execute_files(files, commands, timeout, dry_run)
-                if report:
-                    report_content = generate_execution_report(results)
-                    click.echo(report_content)
+            # Check for file-specific execute command
+            file_config = next(
+                (
+                    f
+                    for f in binding.get("files", [])
+                    if f["name"] == script_name or (
+                        "*" in f["name"] and script_name.endswith(f["name"].replace("*", ""))
+                    )
+                ),
+                None,
+            )
+            execute_command = file_config.get("execute") if file_config else None
         else:
-            click.echo(f"Gist '{gist_name}' doesn't contain any executable files.")
-    except (requests.exceptions.RequestException, ValueError) as e:
-        click.echo(f"Error: {e}")
-
-
-@click.command()
-@click.argument("username_gistname_pair")
-@click.option("--token", "-t", help="GitHub API token for accessing private gists.")
-@click.option("--hash-func", "-f", default="sha256", help="The hash function to use for generating the hash (default: 'sha256').")
-def hash(username_gistname_pair, token, hash_func):
-    """
-    Generate a hash of the combined contents of a GitHub Gist.
-
-    Arguments:
-
-      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
-
-    Options:
-
-      -t, --token TEXT      GitHub API token for accessing private gists.
-
-      -f, --hash-func TEXT  The hash function to use for generating the hash (default: 'sha256').
-
-      -h, --help            Show this message and exit.
-
-    Examples:
-
-      $ gistrun hash octocat/my-gist
-
-        Generate a hash of the combined contents of the gist 'my-gist'.
-
-      $ gistrun hash octocat/my-gist --token YOUR_GITHUB_API_TOKEN
-
-        Generate a hash of the combined contents of 'my-gist' using the provided GitHub API token.
-
-      $ gistrun hash octocat/my-gist --hash-func md5
-
-        Generate an MD5 hash of the combined contents of 'my-gist'.
-    """
-    try:
-        username, gist_name = validate_username_gistname_pair(username_gistname_pair)
-        validate_username(username)
-        validate_gist_name(gist_name)
-
-        if not token:
-            token = get_github_token_from_env()
-
-        gist_data = fetch_gist(username, gist_name, token)
-        gist_hash = hash_gist(gist_data, hash_func)
-        click.echo(f"Hash of the combined gist contents ({hash_func}): {gist_hash}")
-
-    except (requests.exceptions.RequestException, ValueError) as e:
-        click.echo(f"Error: {e}")
-
-
-@click.command()
-@click.argument("username_gistname_pair")
-@click.option("--token", "-t", help="GitHub API token for accessing private gists.")
-def print(username_gistname_pair, token):
-    """
-    Print the contents of a GitHub Gist with syntax highlighting.
-
-    Arguments:
-
-      USERNAME/GIST_NAME  The GitHub username and gist name in the format 'username/gistname'.
-
-    Options:
-
-      -t, --token TEXT    GitHub API token for accessing private gists.
-
-      -h, --help          Show this message and exit.
-
-    Examples:
-
-      $ gistrun print octocat/my-gist
-
-        Print the contents of the gist 'my-gist' with syntax highlighting.
-
-      $ gistrun print octocat/my-private-gist --token YOUR_GITHUB_API_TOKEN Print the contents of the private gist 'my-private-gist' using the  provided GitHub API token.
-
-    """
-    try:
-        username, gist_name = validate_username_gistname_pair(username_gistname_pair)
-        validate_username(username)
-        validate_gist_name(gist_name)
-
-        if not token:
-            token = get_github_token_from_env()
-
-        gist_data = fetch_gist(username, gist_name, token)
-        print_gist(gist_data)
-
-    except (requests.exceptions.RequestException, ValueError) as e:
-        click.echo(f"Error: {e}")
-
-
-@click.command()
-@click.option("--search", "-s", help="Search for gists based on the provided query.")
-@click.option("--list", "-l", "list_username", help="List all gists of the specified user.")
-@click.option("--token", "-t", help="GitHub API token for accessing private gists.")
-def search(search, list_username, token):
-    """
-    Search for gists or list gists of a specific user.
-
-    Options:
-
-      -s, --search TEXT   Search for gists based on the provided query.
-
-      -l, --list TEXT     List all gists of the specified user.
-
-      -t, --token TEXT    GitHub API token for accessing private gists.
-
-      -h, --help          Show this message and exit.
-
-    Examples:
-
-      $ gistrun search --search "python script"
-
-        Search for gists containing the query "python script".
-
-      $ gistrun search --list octocat
-
-        List all gists owned by the user 'octocat'.
-
-      $ gistrun search --list octocat --token YOUR_GITHUB_API_TOKEN
-
-        List all gists owned by 'octocat' using the provided GitHub API token.
-    """
-    try:
-        if not token:
-            token = get_github_token_from_env()
-        if not token:
-            token = None
-        if search:
-            gists = search_gists(search, token)
-            if gists:
-                for gist in gists:
-                    click.echo(f"Gist ID: {gist['id']}, Description: {gist['description']}")
-            else:
-                click.echo("No gists found matching the search query.")
-        elif list_username:
-            validate_username(list_username)
-            gists = list_user_gists(list_username, token)
-            if gists:
-                for gist in gists:
-                    click.echo(f"Gist ID: {gist['id']}, Description: {gist['description']}")
-            else:
-                click.echo(f"No gists found for user: {list_username}")
+            click.echo(f"Error: Alias not found: {alias}")
+            return
+    else:  # Just "script"
+        binding = next((b for b in bindings if b["name"] == name), None)
+        if binding is None:
+            # You need to fetch the gist id for the default gist user
+            gist_id =  # ... (implementation to fetch gist ID for the user) ...
+            script_url = get_gist_url(gist_user, gist_id) + "/" + name
+            execute_command = None
         else:
-            click.echo("Please provide a search query or username.")
-    except (requests.exceptions.RequestException, ValueError) as e:
+            script_url = binding["url"]
+            execute_command = binding.get("execute")
+
+    if execute_command is None:
+        _, extension = os.path.splitext(script_url)
+        execute_command = config.get("extensions", {}).get(
+            extension, DEFAULT_EXECUTE_COMMAND
+        )
+
+        if execute_command is None:
+            click.echo(
+                f"Error: No execute command specified for '{name}' and file extension '{extension}' is not configured. "
+                "Please add an 'execute' key to the binding in your config file or configure a default command for the extension."
+            )
+            return
+
+    try:
+        content = get_gist_content(script_url, token)
+        execute_script(content, execute_command, timeout, dry_run)
+    except FileNotFoundError as e:
         click.echo(f"Error: {e}")
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error: {e}")
+
+
+@gistrun.command()
+@click.argument("username_gist_id")
+@click.option("--token", "-t", help="GitHub API token.")
+@click.option(
+    "--hash-func",
+    "-f",
+    default="sha256",
+    help="The hash function to use (default: sha256)",
+)
+@click.option("--config-file", "-c", help="Path to the config file (optional)")
+def hash_gist(username_gist_id, token, hash_func, config_file=None):
+    """Generate a hash of a GitHub Gist."""
+    try:
+        username, gist_id = username_gist_id.split("/", 1)
+        gist_url = get_gist_url(username, gist_id)
+        content = get_gist_content(gist_url, token)
+
+        hash_obj = hashlib.new(hash_func)
+        hash_obj.update(content.encode())
+        gist_hash = hash_obj.hexdigest()
+
+        click.echo(f"Hash ({hash_func}) of Gist '{gist_url}': {gist_hash}")
+
+    except ValueError as e:
+        click.echo(f"Error: {e}")
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error fetching Gist content: {e}")
+
+
+@gistrun.command()
+@click.argument("username_gist_id")
+@click.option("--token", "-t", help="GitHub API token.")
+@click.option("--config-file", "-c", help="Path to the config file (optional)")
+def print_gist(username_gist_id, token, config_file=None):
+    """Print the contents of a GitHub Gist."""
+    try:
+        username, gist_id = username_gist_id.split("/", 1)
+        gist_url = get_gist_url(username, gist_id)
+        content = get_gist_content(gist_url, token)
+
+        click.echo(content)
+
+    except ValueError as e:
+        click.echo(f"Error: {e}")
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error fetching Gist content: {e}")
+
+
+@gistrun.command()
+@click.argument("source")  # Can be a file path or a URL
+@click.option(
+    "--hash-func",
+    "-f",
+    default="sha256",
+    help="The hash function to use (default: sha256)",
+)
+def hash(source, hash_func):
+    """
+    Generate a hash of a file or content from a URL.
+
+    SOURCE can be either:
+      - <file-path>:  Path to a local file.
+      - <url>:         URL to fetch content from.
+    """
+    if is_url(source):
+        try:
+            source = uri_to_iri(source)  # Convert URI to IRI
+            response = requests.get(source)
+            response.raise_for_status()
+            content = response.content
+        except requests.exceptions.RequestException as e:
+            click.echo(f"Error fetching content from URL: {e}")
+            return
+    else:
+        try:
+            with open(source, "rb") as f:
+                content = f.read()
+        except FileNotFoundError:
+            click.echo(f"File not found: {source}")
+            return
+
+    hash_obj = hashlib.new(hash_func)
+    hash_obj.update(content)
+    file_hash = hash_obj.hexdigest()
+
+    click.echo(f"Hash ({hash_func}) of '{source}': {file_hash}")
 
 
 @gistrun.command()
 def version():
-    """
-    Show the version of the gistrun tool.
-    """
+    """Show the version of the gistrun tool."""
     click.echo(f"gistrun {__version__}")
 
-
-gistrun.add_command(exec)
-gistrun.add_command(hash)
-gistrun.add_command(print)
-gistrun.add_command(search)
-gistrun.add_command(version)
 
 if __name__ == "__main__":
     gistrun()
